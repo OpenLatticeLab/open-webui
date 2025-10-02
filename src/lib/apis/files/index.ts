@@ -192,6 +192,131 @@ export const getFileById = async (token: string, id: string) => {
 	return res;
 };
 
+export const getCrystalSceneByFileId = async (
+	token: string,
+	id: string,
+	radiusStrategy = 'uniform'
+) => {
+	let error = null;
+	const params = new URLSearchParams();
+	if (radiusStrategy) {
+		params.append('radius_strategy', radiusStrategy);
+	}
+
+	const res = await fetch(
+		`${WEBUI_API_BASE_URL}/files/${id}/crystal-scene?${params.toString()}`,
+		{
+			method: 'GET',
+			headers: {
+				Accept: 'application/json',
+				'Content-Type': 'application/json',
+				authorization: `Bearer ${token}`
+			}
+		}
+	)
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			error = err.detail || err.message;
+			console.error(err);
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res;
+};
+
+export type DirectoryListingEntry = {
+	name: string;
+	type: 'file' | 'directory' | 'symlink' | 'other';
+	path: string;
+};
+
+export type DirectoryListingResponse = {
+	cwd: string;
+	path: string;
+	parent: string | null;
+	entries: DirectoryListingEntry[];
+	allowed_extensions: string[];
+};
+
+export type FilePreviewResponse = {
+	path: string;
+	name: string;
+	encoding: string;
+	content: string;
+};
+
+export const getServerCurrentDirectory = async (token: string, path = '') => {
+	let error = null;
+	const params = new URLSearchParams();
+	if (path) {
+		params.append('path', path);
+	}
+
+	const res = await fetch(
+		`${WEBUI_API_BASE_URL}/files/system/current-directory${params.toString() ? `?${params}` : ''}`,
+		{
+			method: 'GET',
+			headers: {
+				Accept: 'application/json',
+				'Content-Type': 'application/json',
+				authorization: `Bearer ${token}`
+			}
+		}
+	)
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			error = err.detail || err.message;
+			console.error(err);
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res as DirectoryListingResponse | null;
+};
+
+export const getServerFilePreview = async (token: string, path: string) => {
+	let error = null;
+	const params = new URLSearchParams();
+	params.append('path', path);
+
+	const res = await fetch(`${WEBUI_API_BASE_URL}/files/system/file-preview?${params.toString()}`, {
+		method: 'GET',
+		headers: {
+			Accept: 'application/json',
+			'Content-Type': 'application/json',
+			authorization: `Bearer ${token}`
+		}
+	})
+		.then(async (res) => {
+			if (!res.ok) throw await res.json();
+			return res.json();
+		})
+		.catch((err) => {
+			error = err.detail || err.message;
+			console.error(err);
+			return null;
+		});
+
+	if (error) {
+		throw error;
+	}
+
+	return res as FilePreviewResponse | null;
+};
+
 export const updateFileDataContentById = async (token: string, id: string, content: string) => {
 	let error = null;
 

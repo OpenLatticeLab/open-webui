@@ -2499,6 +2499,68 @@ RAG_ALLOWED_FILE_EXTENSIONS = PersistentConfig(
     ],
 )
 
+DEFAULT_FILE_PREVIEW_ALLOWED_EXTENSIONS = [
+    ".txt",
+    ".md",
+    ".json",
+    ".py",
+    ".js",
+    ".ts",
+    ".tsx",
+    ".jsx",
+    ".sh",
+    ".cfg",
+    ".ini",
+    ".log",
+    ".csv",
+    ".yml",
+    ".yaml",
+    ".c",
+    ".cpp",
+    ".java",
+    ".rs",
+    ".go",
+    ".rb",
+]
+
+_env_preview_exts = os.environ.get("FILE_PREVIEW_ALLOWED_EXTENSIONS", "").split(",")
+_initial_preview_exts = [
+    (ext.strip().lower() if ext.strip().startswith(".") else f".{ext.strip().lower()}")
+    for ext in _env_preview_exts
+    if ext.strip()
+]
+
+if not _initial_preview_exts:
+    _initial_preview_exts = DEFAULT_FILE_PREVIEW_ALLOWED_EXTENSIONS
+
+FILE_PREVIEW_ALLOWED_EXTENSIONS = PersistentConfig(
+    "FILE_PREVIEW_ALLOWED_EXTENSIONS",
+    "files.preview.allowed_extensions",
+    _initial_preview_exts,
+)
+
+_env_file_browser_root = os.environ.get("FILE_BROWSER_ROOT")
+
+if _env_file_browser_root:
+    try:
+        _resolved_file_browser_root = (
+            Path(_env_file_browser_root).expanduser().resolve()
+        )
+    except Exception:
+        log.warning(
+            "Invalid FILE_BROWSER_ROOT '%s'. Falling back to current working directory.",
+            _env_file_browser_root,
+        )
+        _resolved_file_browser_root = Path.cwd()
+else:
+    _resolved_file_browser_root = Path.cwd()
+
+FILE_BROWSER_ROOT = PersistentConfig(
+    "FILE_BROWSER_ROOT",
+    "files.browser.root",
+    str(_resolved_file_browser_root),
+)
+
 RAG_EMBEDDING_ENGINE = PersistentConfig(
     "RAG_EMBEDDING_ENGINE",
     "rag.embedding_engine",
