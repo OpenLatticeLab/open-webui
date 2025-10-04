@@ -73,7 +73,7 @@
 		getTaskIdsByChatId
 	} from '$lib/apis';
 	import { getTools } from '$lib/apis/tools';
-import { uploadFile, getCrystalSceneByFileId } from '$lib/apis/files';
+	import { uploadFile, getCrystalSceneByFileId } from '$lib/apis/files';
 	import { createOpenAITextStream } from '$lib/apis/streaming';
 
 	import { fade } from 'svelte/transition';
@@ -90,8 +90,8 @@ import { uploadFile, getCrystalSceneByFileId } from '$lib/apis/files';
 	import Tooltip from '../common/Tooltip.svelte';
 	import Sidebar from '../icons/Sidebar.svelte';
 	import { getFunctions } from '$lib/apis/functions';
-import Image from '../common/Image.svelte';
-import CrystalStructureViewer from './CrystalStructureViewer.svelte';
+	import Image from '../common/Image.svelte';
+	import CrystalStructureViewer from './CrystalStructureViewer.svelte';
 
 	export let chatIdProp = '';
 
@@ -157,8 +157,13 @@ import CrystalStructureViewer from './CrystalStructureViewer.svelte';
 	let activeCrystalFileId = null;
 	let latestCifItem = null;
 	let showCrystalViewer = false;
-	let viewerLoading = false;
-	let crystalFilename = '';
+    let viewerLoading = false;
+    let crystalFilename = '';
+	const crystalHeaderBaseClasses = 'font-semibold tracking-[0.05em] text-[0.95rem]';
+	const crystalFilenameClasses =
+		'truncate font-mono text-[0.75rem] text-slate-500 dark:text-slate-400';
+    let crystalCardLeft = '1.5rem';
+    $: crystalCardLeft = $showSidebar ? 'calc(260px + 1.5rem)' : '1.5rem';
 
 	$: if (chatIdProp) {
 		navigateHandler();
@@ -377,9 +382,9 @@ import CrystalStructureViewer from './CrystalStructureViewer.svelte';
 	$: crystalFilename = latestCifItem ? getFileNameFromItem(latestCifItem) : '';
 	$: viewerLoading =
 		(latestCifItem && latestCifItem.status === 'uploading') || crystalLoading;
-	$: showCrystalViewer = Boolean(
-		latestCifItem || crystalScene || crystalLoading || crystalError
-	);
+$: showCrystalViewer = Boolean(
+	latestCifItem || crystalScene || crystalLoading || crystalError
+);
 	$: if (latestCifItem && (!latestCifItem.status || latestCifItem.status === 'uploaded')) {
 		const fileId = getFileIdFromItem(latestCifItem);
 		if (fileId && fileId !== activeCrystalFileId) {
@@ -601,7 +606,7 @@ import CrystalStructureViewer from './CrystalStructureViewer.svelte';
 	};
 
 	let pageSubscribe = null;
-	onMount(async () => {
+    onMount(async () => {
 		loading = true;
 		console.log('mounted');
 		window.addEventListener('message', onMessageHandler);
@@ -677,7 +682,7 @@ import CrystalStructureViewer from './CrystalStructureViewer.svelte';
 	});
 
 	onDestroy(() => {
-		pageSubscribe();
+		pageSubscribe?.();
 		chatIdUnsubscriber?.();
 		window.removeEventListener('message', onMessageHandler);
 		$socket?.off('chat-events', chatEventHandler);
@@ -2467,27 +2472,29 @@ import CrystalStructureViewer from './CrystalStructureViewer.svelte';
 										messagesContainerElement.clientHeight + 5;
 								}}
 							>
-								<div class=" h-full w-full flex flex-col">
-								{#if showCrystalViewer}
-									<div class="self-start mt-6 mb-4 w-full max-w-[28rem] rounded-2xl border border-gray-200/70 bg-white/80 p-3 shadow-sm backdrop-blur-sm dark:border-gray-800/70 dark:bg-gray-900/70">
-										<div class="flex items-baseline justify-between gap-2 pb-2">
-											<span class="text-sm font-semibold uppercase tracking-wide text-gray-600 dark:text-gray-300">
-													{$i18n.t('Crystal Structure')}
-												</span>
-												{#if crystalFilename}
-													<span class="truncate text-xs text-gray-500 dark:text-gray-400" title={crystalFilename}>
-														{crystalFilename}
+								<div class=" h-full w-full flex flex-col gap-4">
+									{#if showCrystalViewer}
+										<div class="fixed top-1/2 z-20 -translate-y-1/2" style={`left:${crystalCardLeft}`}>
+											<div class="w-full max-w-[28rem] rounded-2xl border border-gray-200/70 bg-white/95 p-3 shadow-sm backdrop-blur-sm dark:border-gray-800/70 dark:bg-gray-900/85">
+												<div class="flex items-baseline justify-between gap-2 pb-2">
+													<span class={`${crystalHeaderBaseClasses} text-gray-900 dark:text-gray-100`}>
+														{$i18n.t('Crystal Structure')}
 													</span>
-												{/if}
+													{#if crystalFilename}
+														<span class={crystalFilenameClasses} title={crystalFilename}>
+															{crystalFilename}
+														</span>
+													{/if}
+												</div>
+												<CrystalStructureViewer
+													scene={crystalScene}
+													loading={viewerLoading}
+													error={crystalError}
+													filename={crystalFilename}
+													height={320}
+												/>
 											</div>
-											<CrystalStructureViewer
-												scene={crystalScene}
-												loading={viewerLoading}
-												error={crystalError}
-												filename={crystalFilename}
-												height={320}
-											/>
-									</div>
+										</div>
 									{/if}
 									<Messages
 										chatId={$chatId}
@@ -2567,49 +2574,76 @@ import CrystalStructureViewer from './CrystalStructureViewer.svelte';
 								</div>
 							</div>
 						{:else}
-							<div class="flex items-center h-full">
-								<Placeholder
-									{history}
-									{selectedModels}
-									bind:messageInput
-									bind:files
-									bind:prompt
-									bind:autoScroll
-									bind:selectedToolIds
-									bind:selectedFilterIds
-									bind:imageGenerationEnabled
-									bind:codeInterpreterEnabled
-									bind:webSearchEnabled
-									bind:atSelectedModel
-									bind:showCommands
-									toolServers={$toolServers}
-									{stopResponse}
-									{createMessagePair}
-									{onSelect}
-									onChange={(data) => {
-										if (!$temporaryChatEnabled) {
-											saveDraft(data);
-										}
-									}}
-									on:upload={async (e) => {
-										const { type, data } = e.detail;
+							<div class="flex flex-col flex-auto h-full overflow-auto gap-4">
+							{#if showCrystalViewer}
+								<div class="fixed top-1/2 z-20 -translate-y-1/2" style={`left:${crystalCardLeft}`}>
+									<div class="w-full max-w-[28rem] rounded-2xl border border-gray-200/70 bg-white/95 p-3 shadow-sm backdrop-blur-sm dark:border-gray-800/70 dark:bg-gray-900/85">
+										<div class="flex items-baseline justify-between gap-2 pb-2">
+											<span class={`${crystalHeaderBaseClasses} text-gray-900 dark:text-gray-100`}>
+												{$i18n.t('Crystal Structure')}
+											</span>
+											{#if crystalFilename}
+												<span class={crystalFilenameClasses} title={crystalFilename}>
+													{crystalFilename}
+												</span>
+											{/if}
+										</div>
+										<CrystalStructureViewer
+											scene={crystalScene}
+											loading={viewerLoading}
+											error={crystalError}
+											filename={crystalFilename}
+											height={320}
+										/>
+									</div>
+								</div>
+							{/if}
 
-										if (type === 'web') {
-											await uploadWeb(data);
-										} else if (type === 'youtube') {
-											await uploadYoutubeTranscription(data);
-										}
-									}}
-									on:submit={async (e) => {
-										clearDraft();
-										if (e.detail || files.length > 0) {
-											await tick();
-											submitPrompt(e.detail.replaceAll('\n\n', '\n'));
-										}
-									}}
-								/>
-							</div>
-						{/if}
+							<div class="flex items-center justify-center flex-auto">
+									<Placeholder
+										{history}
+										{selectedModels}
+										bind:messageInput
+										bind:files
+										bind:prompt
+										bind:autoScroll
+										bind:selectedToolIds
+										bind:selectedFilterIds
+										bind:imageGenerationEnabled
+										bind:codeInterpreterEnabled
+										bind:webSearchEnabled
+										bind:atSelectedModel
+										bind:showCommands
+										toolServers={$toolServers}
+										{stopResponse}
+										{createMessagePair}
+										{onSelect}
+										onChange={(data) => {
+											if (!$temporaryChatEnabled) {
+												saveDraft(data);
+											}
+										}}
+										on:upload={async (e) => {
+											const { type, data } = e.detail;
+
+											if (type === 'web') {
+												await uploadWeb(data);
+											} else if (type === 'youtube') {
+												await uploadYoutubeTranscription(data);
+											}
+										}}
+										on:submit={async (e) => {
+											clearDraft();
+											if (e.detail || files.length > 0) {
+												await tick();
+
+												submitPrompt(e.detail.replaceAll('\n\n', '\n'));
+											}
+										}}
+									/>
+								</div>
+						</div>
+					{/if}
 					</div>
 				</Pane>
 

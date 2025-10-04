@@ -502,7 +502,6 @@
 	.owui-dir-title {
 		font-weight: 600;
 		font-size: 0.95rem;
-		text-transform: uppercase;
 		letter-spacing: 0.05em;
 		color: rgb(55, 65, 81);
 	}
