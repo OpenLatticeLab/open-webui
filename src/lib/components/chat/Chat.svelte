@@ -73,7 +73,7 @@
 		getTaskIdsByChatId
 	} from '$lib/apis';
 	import { getTools } from '$lib/apis/tools';
-	import { uploadFile } from '$lib/apis/files';
+import { uploadFile, getCrystalSceneByFileId } from '$lib/apis/files';
 	import { createOpenAITextStream } from '$lib/apis/streaming';
 
 	import { fade } from 'svelte/transition';
@@ -90,7 +90,8 @@
 	import Tooltip from '../common/Tooltip.svelte';
 	import Sidebar from '../icons/Sidebar.svelte';
 	import { getFunctions } from '$lib/apis/functions';
-	import Image from '../common/Image.svelte';
+import Image from '../common/Image.svelte';
+import CrystalStructureViewer from './CrystalStructureViewer.svelte';
 
 	export let chatIdProp = '';
 
@@ -149,6 +150,15 @@
 	let chatFiles = [];
 	let files = [];
 	let params = {};
+
+	let crystalScene = null;
+	let crystalLoading = false;
+	let crystalError = '';
+	let activeCrystalFileId = null;
+	let latestCifItem = null;
+	let showCrystalViewer = false;
+	let viewerLoading = false;
+	let crystalFilename = '';
 
 	$: if (chatIdProp) {
 		navigateHandler();
@@ -293,6 +303,97 @@
 			}
 		}
 	};
+
+	const translate = (key: string, params: Record<string, unknown> = {}) => {
+		try {
+			return get(i18n).t(key, params);
+		} catch (error) {
+			return key;
+		}
+	};
+
+	const getFileIdFromItem = (item) => item?.id ?? item?.file?.id ?? item?.file_id ?? null;
+
+	const getFileNameFromItem = (item) =>
+		item?.name ?? item?.file?.meta?.name ?? item?.file?.filename ?? '';
+
+	const isCifFileItem = (item) => {
+		if (!item) return false;
+		const originalName = getFileNameFromItem(item);
+		const name = String(originalName || '').toLowerCase().trim();
+		return name.endsWith('.cif');
+	};
+
+	const findLatestCifItem = (chatItems: any[], pendingItems: any[]) => {
+		const combined = [...chatItems, ...pendingItems];
+		for (let idx = combined.length - 1; idx >= 0; idx -= 1) {
+			const entry = combined[idx];
+			if (isCifFileItem(entry)) {
+				return entry;
+			}
+		}
+		return null;
+	};
+
+	const loadCrystalScene = async (fileId: string) => {
+		if (!fileId || (crystalLoading && activeCrystalFileId === fileId)) {
+			return;
+		}
+
+		if (activeCrystalFileId !== fileId) {
+			crystalScene = null;
+		}
+
+		activeCrystalFileId = fileId;
+		crystalLoading = true;
+		crystalError = '';
+
+		try {
+			if (!localStorage?.token) {
+				throw new Error(translate('Authentication token is missing.'));
+			}
+			const response = await getCrystalSceneByFileId(localStorage.token, fileId);
+			const scene = response?.scene ?? null;
+			if (!scene) {
+				throw new Error(translate('Crystal scene response was empty.'));
+			}
+			crystalScene = scene;
+		} catch (error: any) {
+			console.error('Failed to load crystal scene', error);
+			const message =
+				error?.detail ||
+				error?.message ||
+				(typeof error === 'string'
+					? error
+					: translate('Failed to load crystal structure preview.'));
+			crystalError = message;
+			crystalScene = null;
+		} finally {
+			crystalLoading = false;
+		}
+	};
+
+	$: latestCifItem = findLatestCifItem(chatFiles, files);
+	$: crystalFilename = latestCifItem ? getFileNameFromItem(latestCifItem) : '';
+	$: viewerLoading =
+		(latestCifItem && latestCifItem.status === 'uploading') || crystalLoading;
+	$: showCrystalViewer = Boolean(
+		latestCifItem || crystalScene || crystalLoading || crystalError
+	);
+	$: if (latestCifItem && (!latestCifItem.status || latestCifItem.status === 'uploaded')) {
+		const fileId = getFileIdFromItem(latestCifItem);
+		if (fileId && fileId !== activeCrystalFileId) {
+			loadCrystalScene(fileId);
+		}
+	} else if (latestCifItem && latestCifItem.status === 'uploading') {
+		activeCrystalFileId = null;
+		crystalScene = null;
+		crystalError = '';
+	} else if (!latestCifItem) {
+		activeCrystalFileId = null;
+		crystalScene = null;
+		crystalError = '';
+	}
 
 	const showMessage = async (message) => {
 		await tick();
@@ -2367,6 +2468,27 @@
 								}}
 							>
 								<div class=" h-full w-full flex flex-col">
+								{#if showCrystalViewer}
+									<div class="self-start mt-6 mb-4 w-full max-w-[28rem] rounded-2xl border border-gray-200/70 bg-white/80 p-3 shadow-sm backdrop-blur-sm dark:border-gray-800/70 dark:bg-gray-900/70">
+										<div class="flex items-baseline justify-between gap-2 pb-2">
+											<span class="text-sm font-semibold uppercase tracking-wide text-gray-600 dark:text-gray-300">
+													{$i18n.t('Crystal Structure')}
+												</span>
+												{#if crystalFilename}
+													<span class="truncate text-xs text-gray-500 dark:text-gray-400" title={crystalFilename}>
+														{crystalFilename}
+													</span>
+												{/if}
+											</div>
+											<CrystalStructureViewer
+												scene={crystalScene}
+												loading={viewerLoading}
+												error={crystalError}
+												filename={crystalFilename}
+												height={320}
+											/>
+									</div>
+									{/if}
 									<Messages
 										chatId={$chatId}
 										bind:history

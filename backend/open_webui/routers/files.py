@@ -4,7 +4,7 @@ import uuid
 import json
 from fnmatch import fnmatch
 from pathlib import Path
-from typing import Optional
+from typing import List, Literal, Optional
 from urllib.parse import quote
 import asyncio
 
@@ -23,6 +23,10 @@ from fastapi import (
 
 from fastapi.responses import FileResponse, StreamingResponse
 from open_webui.constants import ERROR_MESSAGES
+from open_webui.config import (
+    DEFAULT_FILE_PREVIEW_ALLOWED_EXTENSIONS,
+    FILE_PREVIEW_ALLOWED_EXTENSIONS,
+)
 from open_webui.env import SRC_LOG_LEVELS
 from open_webui.retrieval.vector.factory import VECTOR_DB_CLIENT
 
@@ -40,12 +44,251 @@ from open_webui.routers.retrieval import ProcessFileForm, process_file
 from open_webui.routers.audio import transcribe
 from open_webui.storage.provider import Storage
 from open_webui.utils.auth import get_admin_user, get_verified_user
+from open_webui.utils.crystal import cif_file_to_scene, cif_string_to_scene
 from pydantic import BaseModel
 
 log = logging.getLogger(__name__)
 log.setLevel(SRC_LOG_LEVELS["MODELS"])
 
 router = APIRouter()
+
+
+############################
+# Current Directory Listing
+############################
+
+
+class DirectoryListingEntry(BaseModel):
+    name: str
+    type: Literal["file", "directory", "symlink", "other"]
+    path: str
+
+
+class DirectoryListingResponse(BaseModel):
+    cwd: str
+    path: str
+    parent: Optional[str]
+    entries: List[DirectoryListingEntry]
+    allowed_extensions: List[str]
+
+
+def _normalize_extension(ext: str) -> str:
+    value = ext.strip().lower()
+    if not value:
+        return ""
+    return value if value.startswith(".") else f".{value}"
+
+
+def _get_allowed_preview_extensions_from_config() -> List[str]:
+    configured = FILE_PREVIEW_ALLOWED_EXTENSIONS.value
+    if isinstance(configured, (list, tuple, set)) and configured:
+        normalized = sorted({
+            _normalize_extension(str(item))
+            for item in configured
+            if str(item).strip()
+        })
+        if normalized:
+            return normalized
+
+    return sorted({
+        _normalize_extension(ext)
+        for ext in DEFAULT_FILE_PREVIEW_ALLOWED_EXTENSIONS
+        if ext.strip()
+    })
+
+
+def _allowed_preview_extensions_set() -> set[str]:
+    return set(_get_allowed_preview_extensions_from_config())
+
+
+def _resolve_browser_root(root_value: str) -> Path:
+    try:
+        return Path(root_value).expanduser().resolve()
+    except Exception as exc:
+        log.error(
+            "Failed to resolve configured file browser root '%s'",
+            root_value,
+            exc_info=exc,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=ERROR_MESSAGES.DEFAULT("File browser root is misconfigured."),
+        ) from exc
+
+
+@router.get("/system/current-directory", response_model=DirectoryListingResponse)
+def get_current_directory_listing(
+    request: Request,
+    path: str = Query(""),
+    user=Depends(get_verified_user),
+):
+    del user
+
+    root_value = getattr(request.app.state.config, "FILE_BROWSER_ROOT", str(Path.cwd()))
+    root = _resolve_browser_root(root_value)
+    allowed_extensions = _get_allowed_preview_extensions_from_config()
+    try:
+        relative_path = Path(path)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ERROR_MESSAGES.DEFAULT("Invalid path supplied."),
+        ) from exc
+
+    target_path = (root / relative_path).resolve()
+
+    try:
+        target_path.relative_to(root)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ERROR_MESSAGES.DEFAULT("Path escapes the workspace root."),
+        ) from exc
+
+    if not target_path.exists() or not target_path.is_dir():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    entries: List[DirectoryListingEntry] = []
+
+    try:
+        for child in sorted(target_path.iterdir(), key=lambda p: p.name.lower()):
+            try:
+                if child.is_dir():
+                    entry_type = "directory"
+                elif child.is_file():
+                    entry_type = "file"
+                elif child.is_symlink():
+                    entry_type = "symlink"
+                else:
+                    entry_type = "other"
+            except OSError:
+                entry_type = "other"
+
+            rel_child = os.path.relpath(child, root)
+            if rel_child == ".":
+                rel_child = ""
+
+            entries.append(
+                DirectoryListingEntry(
+                    name=child.name,
+                    type=entry_type,
+                    path=rel_child,
+                )
+            )
+    except OSError as exc:
+        log.error("Failed to iterate directory %s", target_path, exc_info=exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=ERROR_MESSAGES.DEFAULT("Unable to read server directory"),
+        ) from exc
+
+    rel_target = os.path.relpath(target_path, root)
+    if rel_target == ".":
+        rel_target = ""
+
+    parent: Optional[str]
+    if target_path == root:
+        parent = None
+    else:
+        parent_path = target_path.parent
+        parent = os.path.relpath(parent_path, root)
+        if parent == ".":
+            parent = ""
+
+    return DirectoryListingResponse(
+        cwd=str(root),
+        path=rel_target,
+        parent=parent,
+        entries=entries,
+        allowed_extensions=allowed_extensions,
+    )
+
+MAX_FILE_PREVIEW_BYTES = 1024 * 128
+
+
+class FilePreviewResponse(BaseModel):
+    path: str
+    name: str
+    encoding: str
+    content: str
+
+
+@router.get("/system/file-preview", response_model=FilePreviewResponse)
+def get_system_file_preview(
+    request: Request,
+    path: str = Query(..., description="Relative path from the server root"),
+    user=Depends(get_verified_user),
+):
+    del user
+
+    root_value = getattr(request.app.state.config, "FILE_BROWSER_ROOT", str(Path.cwd()))
+    root = _resolve_browser_root(root_value)
+    try:
+        relative_path = Path(path)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ERROR_MESSAGES.DEFAULT("Invalid path supplied."),
+        ) from exc
+
+    target_path = (root / relative_path).resolve()
+
+    try:
+        target_path.relative_to(root)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ERROR_MESSAGES.DEFAULT("Path escapes the workspace root."),
+        ) from exc
+
+    if not target_path.exists() or not target_path.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    file_extension = _normalize_extension(target_path.suffix)
+    if file_extension not in _allowed_preview_extensions_set():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ERROR_MESSAGES.DEFAULT("Preview is not supported for this file type."),
+        )
+
+    try:
+        file_size = target_path.stat().st_size
+    except OSError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=ERROR_MESSAGES.DEFAULT("Unable to read file metadata."),
+        ) from exc
+
+    if file_size > MAX_FILE_PREVIEW_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ERROR_MESSAGES.DEFAULT("File is too large to preview."),
+        )
+
+    try:
+        content = target_path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=ERROR_MESSAGES.DEFAULT("Unable to read file content."),
+        ) from exc
+
+    rel_file_path = os.path.relpath(target_path, root)
+    if rel_file_path == ".":
+        rel_file_path = ""
+
+    return FilePreviewResponse(
+        path=rel_file_path,
+        name=target_path.name,
+        encoding="utf-8",
+        content=content,
+    )
 
 
 ############################
@@ -588,6 +831,69 @@ async def get_file_content_by_id(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=ERROR_MESSAGES.NOT_FOUND,
         )
+
+
+@router.get("/{id}/crystal-scene")
+async def get_file_crystal_scene(
+    id: str,
+    radius_strategy: str = Query("uniform"),
+    user=Depends(get_verified_user),
+):
+    file = Files.get_file_by_id(id)
+
+    if not file:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    if not (
+        file.user_id == user.id
+        or user.role == "admin"
+        or has_access_to_file(id, "read", user)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
+        )
+
+    filename = (file.meta or {}).get("name", file.filename)
+    if not (filename and filename.lower().endswith(".cif")):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=ERROR_MESSAGES.DEFAULT("Requested file is not a CIF structure."),
+        )
+
+    cached = None
+    if isinstance(file.data, dict):
+        cached = file.data.get("crystal_scene")
+        if isinstance(cached, dict):
+            return {"scene": cached}
+
+    try:
+        if file.path:
+            file_path = Storage.get_file(file.path)
+            scene = cif_file_to_scene(file_path, radius_strategy=radius_strategy)
+        elif isinstance(file.data, dict) and file.data.get("content"):
+            scene = cif_string_to_scene(
+                file.data["content"], radius_strategy=radius_strategy
+            )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=ERROR_MESSAGES.DEFAULT("CIF source data is unavailable."),
+            )
+    except HTTPException:
+        raise
+    except Exception as exc:  # pragma: no cover - storage issues
+        log.exception("Error generating crystal scene", exc_info=exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=ERROR_MESSAGES.DEFAULT("Failed to generate crystal scene."),
+        ) from exc
+
+    Files.update_file_data_by_id(file.id, {"crystal_scene": scene})
+    return {"scene": scene}
 
 
 @router.get("/{id}/content/html")
