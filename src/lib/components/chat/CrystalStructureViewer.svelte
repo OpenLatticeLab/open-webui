@@ -8,10 +8,10 @@
 	import ReactDOM from 'react-dom';
 	import { CrystalToolkitScene } from '@materialsproject/mp-react-components';
 	import {
+		downloadServerFile,
 		getServerCurrentDirectory,
-		getServerFilePreview,
-		type DirectoryListingResponse,
-		type FilePreviewResponse
+		getServerCrystalScene,
+		type DirectoryListingResponse
 	} from '$lib/apis/files';
 
 	const i18n: Writable<i18nType> = getContext('i18n');
@@ -32,6 +32,7 @@
 	};
 
 	let container: HTMLDivElement | undefined;
+	let computedSceneSize: number | string = height;
 	let resizeObserver: ResizeObserver | null = null;
 	let resizeScheduled = false;
 
@@ -40,11 +41,51 @@
 	let directoryError: string | null = null;
 	let currentPath = '';
 
-	let preview: FilePreviewResponse | null = null;
-	let previewLoading = false;
-	let previewError: string | null = null;
+	let serverScene: Record<string, unknown> | null = null;
+	let serverSceneLoading = false;
+	let serverSceneError: string | null = null;
+	let serverSceneFilename: string | null = null;
+	let serverScenePath: string | null = null;
+
+	let downloadNotice: string | null = null;
+	let downloadError: string | null = null;
+
+	let serverSelectionActive = false;
+	let effectiveScene: Record<string, unknown> | null = scene;
+	let effectiveLoading = loading;
+	let effectiveError: string | null = error;
+	let effectiveFilename: string | null = filename;
 
 	const MAX_FORCE_RENDER_ATTEMPTS = 6;
+
+	const updateSceneDimensions = () => {
+		if (!container) return;
+		const parsedHeight =
+			typeof height === 'number' && height > 0 ? height : Number.parseFloat(String(height)) || 320;
+		let newSize: number | string = parsedHeight;
+		try {
+			const styles = getComputedStyle(container);
+			const paddingLeft = parseFloat(styles.paddingLeft || '0');
+			const paddingRight = parseFloat(styles.paddingRight || '0');
+			const availableWidth = container.clientWidth - paddingLeft - paddingRight;
+			if (availableWidth > 0) {
+				newSize = availableWidth;
+			}
+			else if (container.clientWidth > 0) {
+				newSize = container.clientWidth;
+			}
+		} catch (err) {
+			if (container.clientWidth > 0) {
+				newSize = container.clientWidth;
+			}
+		}
+		if (typeof newSize === 'number' && (!Number.isFinite(newSize) || newSize <= 0)) {
+			newSize = parsedHeight;
+		}
+		if (newSize !== computedSceneSize) {
+			computedSceneSize = newSize;
+		}
+	};
 
 	const translate = (key: string, options: Record<string, unknown> = {}) => {
 		const translator = get(i18n);
@@ -54,54 +95,28 @@
 		return key;
 	};
 
-	const DEFAULT_PREVIEWABLE_EXTENSIONS = [
-		'.txt',
-		'.md',
-		'.json',
-		'.py',
-		'.js',
-		'.ts',
-		'.tsx',
-		'.jsx',
-		'.sh',
-		'.cfg',
-		'.ini',
-		'.log',
-		'.csv',
-		'.yml',
-		'.yaml',
-		'.c',
-		'.cpp',
-		'.java',
-		'.rs',
-		'.go',
-		'.rb'
-	];
-
-	const normalizeExtension = (value: string) => {
-		const trimmed = value.trim().toLowerCase();
-		if (!trimmed) return '';
-		return trimmed.startsWith('.') ? trimmed : `.${trimmed}`;
+	const isStructureFile = (name: string) => {
+		const normalized = name.trim().toLowerCase();
+		return normalized.endsWith('.cif') || ['contcar', 'poscar'].includes(normalized);
 	};
 
-	let previewableExtensions = new Set(DEFAULT_PREVIEWABLE_EXTENSIONS.map(normalizeExtension));
-
-	const getExtension = (name: string) => {
-		const idx = name.lastIndexOf('.');
-		return idx === -1 ? '' : name.slice(idx);
+	const resetServerSelection = () => {
+		serverScene = null;
+		serverSceneLoading = false;
+		serverSceneError = null;
+		serverSceneFilename = null;
+		serverScenePath = null;
 	};
 
-	const isPreviewable = (name: string) => {
-		const ext = normalizeExtension(getExtension(name));
-		return Boolean(ext) && previewableExtensions.has(ext);
+	const resetDownloadFeedback = () => {
+		downloadNotice = null;
+		downloadError = null;
 	};
 
 	const loadDirectoryListing = async (path = currentPath) => {
 		if (!browser) return;
 		directoryLoading = true;
 		directoryError = null;
-		previewError = null;
-		preview = null;
 
 		try {
 			const token = localStorage?.token;
@@ -110,8 +125,6 @@
 			}
 			const response = await getServerCurrentDirectory(token, path);
 			directoryListing = response;
-			const extensions = response?.allowed_extensions ?? DEFAULT_PREVIEWABLE_EXTENSIONS;
-			previewableExtensions = new Set(extensions.map((ext) => normalizeExtension(ext)));
 			currentPath = response?.path ?? '';
 		} catch (err: unknown) {
 			console.error('Failed to load server directory listing', err);
@@ -123,13 +136,14 @@
 				directoryError = translate('Failed to load server directory listing.');
 			}
 			directoryListing = null;
-			previewableExtensions = new Set(DEFAULT_PREVIEWABLE_EXTENSIONS.map(normalizeExtension));
 		} finally {
 			directoryLoading = false;
 		}
 	};
 
 	const navigateTo = async (path: string) => {
+		resetServerSelection();
+		resetDownloadFeedback();
 		await loadDirectoryListing(path);
 	};
 
@@ -139,36 +153,102 @@
 		}
 	};
 
-	const openPreview = async (path: string, name: string) => {
-		if (!browser) return;
-		if (!isPreviewable(name)) {
-			previewError = translate('Preview is not available for this file type.');
-			preview = null;
+	const handleStructureSelection = async (path: string, name: string) => {
+		if (serverSceneLoading && serverScenePath === path) {
 			return;
 		}
-		previewLoading = true;
-		previewError = null;
+		if (!browser) return;
+		resetDownloadFeedback();
+		const displayName = name?.trim() || translate('file');
+		serverSceneLoading = true;
+		serverSceneError = null;
+		serverScene = null;
+		serverSceneFilename = displayName;
+		serverScenePath = path;
+
 		try {
 			const token = localStorage?.token;
 			if (!token) {
 				throw new Error(translate('Authentication token is missing.'));
 			}
-			const response = await getServerFilePreview(token, path);
-			preview = response;
-		} catch (err: unknown) {
-			console.error('Failed to load file preview', err);
-			preview = null;
-			if (err && typeof err === 'object' && 'detail' in err && typeof err.detail === 'string') {
-				previewError = err.detail;
-			} else if (err instanceof Error && err.message) {
-				previewError = err.message;
-			} else {
-				previewError = translate('Failed to load file preview.');
+			const response = await getServerCrystalScene(token, path);
+			const sceneData = response?.scene ?? null;
+			if (!sceneData) {
+				throw new Error(translate('Crystal scene response was empty.'));
 			}
+			serverScene = sceneData;
+		} catch (err: unknown) {
+			console.error('Failed to load server crystal scene', err);
+			if (err && typeof err === 'object' && 'detail' in err && typeof err.detail === 'string') {
+				serverSceneError = err.detail as string;
+			} else if (err instanceof Error && err.message) {
+				serverSceneError = err.message;
+			} else if (typeof err === 'string') {
+				serverSceneError = err;
+			} else {
+				serverSceneError = translate('Failed to load crystal structure preview.');
+			}
+			serverScene = null;
 		} finally {
-			previewLoading = false;
+			serverSceneLoading = false;
 		}
 	};
+
+	const handleFileDownload = async (path: string, name: string) => {
+		if (!browser) return;
+		resetServerSelection();
+		resetDownloadFeedback();
+		const displayName = name?.trim() || translate('file');
+
+		try {
+			const token = localStorage?.token;
+			if (!token) {
+				throw new Error(translate('Authentication token is missing.'));
+			}
+			await downloadServerFile(token, path);
+			downloadNotice = translate('Download started for {{filename}}', { filename: displayName });
+		} catch (err: unknown) {
+			console.error('Failed to download server file', err);
+			if (err && typeof err === 'object' && 'detail' in err && typeof err.detail === 'string') {
+				downloadError = err.detail as string;
+			} else if (err instanceof Error && err.message) {
+				downloadError = err.message;
+			} else if (typeof err === 'string') {
+				downloadError = err;
+			} else {
+				downloadError = translate('Failed to download file.');
+			}
+		}
+	};
+
+	const handleEntryClick = async (
+		entry: DirectoryListingResponse['entries'][number]
+	) => {
+		if (entry.type === 'directory') {
+			await navigateTo(entry.path);
+			return;
+		}
+
+		if (entry.type !== 'file' && entry.type !== 'symlink') {
+			return;
+		}
+
+		if (isStructureFile(entry.name)) {
+			await handleStructureSelection(entry.path, entry.name);
+		} else {
+			await handleFileDownload(entry.path, entry.name);
+		}
+	};
+
+	const clearServerSelection = () => {
+		resetServerSelection();
+	};
+
+	$: serverSelectionActive = Boolean(serverSceneLoading || serverSceneError || serverScene);
+	$: effectiveScene = serverSelectionActive ? serverScene : scene;
+	$: effectiveLoading = serverSelectionActive ? serverSceneLoading : loading;
+	$: effectiveError = serverSelectionActive ? serverSceneError : error;
+	$: effectiveFilename = serverSelectionActive ? serverSceneFilename : filename;
 
 	const breadcrumbs = () => {
 		if (!directoryListing) {
@@ -254,8 +334,9 @@
 		if (!container) {
 			return;
 		}
+		updateSceneDimensions();
 
-		if (!scene || loading || error) {
+		if (!effectiveScene || effectiveLoading || effectiveError) {
 			ReactDOM.unmountComponentAtNode(container);
 			container.dataset.rendered = 'false';
 			return;
@@ -264,8 +345,8 @@
 		try {
 			ReactDOM.render(
 				React.createElement(CrystalToolkitScene, {
-					data: scene,
-					sceneSize: height,
+					data: effectiveScene,
+					sceneSize: computedSceneSize,
 					showControls: true,
 					showExpandButton: false,
 					showImageButton: false,
@@ -299,6 +380,7 @@
 					resizeScheduled = true;
 					requestAnimationFrame(() => {
 						resizeScheduled = false;
+						updateSceneDimensions();
 						renderScene();
 					});
 				});
@@ -312,20 +394,24 @@
 	});
 
 	let lastScene: Record<string, unknown> | null = null;
-	let lastLoading = loading;
-	let lastError: string | null = error;
+	let lastLoading = effectiveLoading;
+	let lastError: string | null = effectiveError;
 	let lastHeight = height;
+	let viewerHeightStyle = typeof height === 'number' ? `${height}px` : `${height}`;
+
+	$: viewerHeightStyle =
+		typeof computedSceneSize === 'number' ? `${computedSceneSize}px` : `${computedSceneSize}`;
 
 	$: {
-		const sceneChanged = scene !== lastScene;
-		const loadingChanged = loading !== lastLoading;
-		const errorChanged = error !== lastError;
+		const sceneChanged = effectiveScene !== lastScene;
+		const loadingChanged = effectiveLoading !== lastLoading;
+		const errorChanged = effectiveError !== lastError;
 		const heightChanged = height !== lastHeight;
 
 		if (sceneChanged || loadingChanged || errorChanged || heightChanged) {
-			lastScene = scene;
-			lastLoading = loading;
-			lastError = error;
+			lastScene = effectiveScene;
+			lastLoading = effectiveLoading;
+			lastError = effectiveError;
 			lastHeight = height;
 			renderScene();
 		}
@@ -341,16 +427,16 @@
 </script>
 
 <div class="owui-crystal-viewer">
-	<div class="owui-crystal-canvas" bind:this={container} style={`height:${height}px`}></div>
-	{#if !scene}
-		{#if loading}
+	<div class="owui-crystal-canvas" bind:this={container} style={`height:${viewerHeightStyle}`}></div>
+	{#if !effectiveScene}
+		{#if effectiveLoading}
 			<div class="owui-crystal-status">{$i18n.t('Loading crystal structure…')}</div>
-		{:else if error}
-			<div class="owui-crystal-status owui-crystal-error">{error}</div>
+		{:else if effectiveError}
+			<div class="owui-crystal-status owui-crystal-error">{effectiveError}</div>
 		{:else}
 			<div class="owui-crystal-status">
-				{#if filename}
-					{$i18n.t('Waiting for {{filename}} preview', { filename })}
+				{#if effectiveFilename}
+					{$i18n.t('Waiting for {{filename}} preview', { filename: effectiveFilename })}
 				{:else}
 					{$i18n.t('Upload a CIF file to preview its crystal structure')}
 				{/if}
@@ -358,91 +444,105 @@
 		{/if}
 	{/if}
 	<div class="owui-dir-viewer">
-		<div class="owui-dir-header">
-			<span class="owui-dir-title">{$i18n.t('Server Files')}</span>
-			{#if directoryListing?.path}
-				<span class="owui-dir-path">{directoryListing.path}</span>
+		<div class="owui-dir-panel">
+			<div class="owui-dir-header">
+				<span class="owui-dir-title">{$i18n.t('Server Files')}</span>
+				{#if directoryListing?.path}
+					<span class="owui-dir-path">{directoryListing.path}</span>
+				{/if}
+			</div>
+			{#if directoryLoading}
+				<div class="owui-dir-status">{$i18n.t('Loading server directory…')}</div>
+			{:else if directoryError}
+				<div class="owui-dir-status owui-dir-error">{directoryError}</div>
+			{:else if directoryListing}
+				{@const crumbs = breadcrumbs()}
+				<div class="owui-dir-breadcrumbs">
+					{#each crumbs as crumb, index (crumb.path)}
+						<button
+							type="button"
+							class="owui-dir-breadcrumb {directoryListing.path === crumb.path ? 'active' : ''}"
+							on:click={() => navigateTo(crumb.path)}
+							disabled={directoryListing.path === crumb.path}
+						>
+							{crumb.label || $i18n.t('Root')}
+						</button>
+						{#if index < crumbs.length - 1}
+							<span class="owui-dir-breadcrumb-separator">/</span>
+						{/if}
+					{/each}
+				</div>
+				{#if directoryListing.parent !== null}
+					<button type="button" class="owui-dir-up" on:click={goToParent}>
+						<span>..</span>
+					</button>
+				{/if}
+				<div class="owui-dir-body">
+					<div class="owui-dir-entries-wrapper">
+						{#if directoryListing.entries.length === 0}
+							<div class="owui-dir-status">{$i18n.t('No files found in current directory.')}</div>
+						{:else}
+							<ul class="owui-dir-entries">
+								{#each directoryListing.entries as entry (entry.path)}
+									<li>
+										<button
+											type="button"
+											class={`owui-dir-entry ${entry.type} ${serverScenePath === entry.path ? 'selected' : ''}`}
+											on:click={() => handleEntryClick(entry)}
+										>
+											<span class="owui-dir-entry-icon">
+												{#if entry.type === 'directory'}
+													📁
+												{:else if entry.type === 'symlink'}
+													🔗
+												{:else}
+													📄
+												{/if}
+											</span>
+											<span class="owui-dir-entry-name">{entry.name}</span>
+											{#if entry.type === 'file' && isStructureFile(entry.name)}
+												<span class="owui-dir-entry-tag">{$i18n.t('Structure')}</span>
+											{/if}
+										</button>
+									</li>
+								{/each}
+							</ul>
+						{/if}
+					</div>
+					<div class="owui-dir-preview">
+						{#if serverSceneFilename || serverScenePath}
+							<div class="owui-dir-preview-header">
+								<span class="owui-dir-preview-name">{serverSceneFilename}</span>
+								<button type="button" class="owui-dir-preview-close" on:click={clearServerSelection}>
+									{$i18n.t('Clear')}
+								</button>
+							</div>
+						{/if}
+						{#if serverSceneLoading}
+							<div class="owui-dir-preview-status">{$i18n.t('Loading crystal structure…')}</div>
+						{:else if serverSceneError}
+							<div class="owui-dir-preview-status owui-dir-error">{serverSceneError}</div>
+						{:else if serverScene}
+							<div class="owui-dir-preview-status owui-dir-success">
+								{$i18n.t('Displaying structure for {{filename}}', { filename: serverSceneFilename })}
+							</div>
+						{:else}
+							<div class="owui-dir-preview-status owui-dir-empty">
+								{$i18n.t('Select a CIF or POSCAR/CONTCAR file to view its structure.')}
+							</div>
+						{/if}
+						{#if downloadNotice}
+							<div class="owui-dir-preview-status owui-dir-info">{downloadNotice}</div>
+						{/if}
+						{#if downloadError}
+							<div class="owui-dir-preview-status owui-dir-error">{downloadError}</div>
+						{/if}
+					</div>
+				</div>
+			{:else}
+				<div class="owui-dir-status">{$i18n.t('No directory data available.')}</div>
 			{/if}
 		</div>
-		{#if directoryLoading}
-			<div class="owui-dir-status">{$i18n.t('Loading server directory…')}</div>
-		{:else if directoryError}
-			<div class="owui-dir-status owui-dir-error">{directoryError}</div>
-		{:else if directoryListing}
-			{@const crumbs = breadcrumbs()}
-			<div class="owui-dir-breadcrumbs">
-				{#each crumbs as crumb, index (crumb.path)}
-					<button
-						type="button"
-						class="owui-dir-breadcrumb {directoryListing.path === crumb.path ? 'active' : ''}"
-						on:click={() => navigateTo(crumb.path)}
-						disabled={directoryListing.path === crumb.path}
-					>
-						{crumb.label || $i18n.t('Root')}
-					</button>
-					{#if index < crumbs.length - 1}
-						<span class="owui-dir-breadcrumb-separator">/</span>
-					{/if}
-				{/each}
-			</div>
-			{#if directoryListing.parent !== null}
-				<button type="button" class="owui-dir-up" on:click={goToParent}>
-					<span>..</span>
-				</button>
-			{/if}
-			<div class="owui-dir-body">
-				<div class="owui-dir-entries-wrapper">
-					{#if directoryListing.entries.length === 0}
-						<div class="owui-dir-status">{$i18n.t('No files found in current directory.')}</div>
-					{:else}
-						<ul class="owui-dir-entries">
-							{#each directoryListing.entries as entry (entry.path)}
-								<li>
-									<button
-										type="button"
-										class={`owui-dir-entry ${entry.type} ${preview?.path === entry.path ? 'selected' : ''}`}
-										on:click={() => (entry.type === 'directory' ? navigateTo(entry.path) : openPreview(entry.path, entry.name))}
-									>
-										<span class="owui-dir-entry-icon">
-											{#if entry.type === 'directory'}
-												📁
-											{:else if entry.type === 'symlink'}
-												🔗
-											{:else}
-												📄
-											{/if}
-										</span>
-										<span class="owui-dir-entry-name">{entry.name}</span>
-										{#if entry.type === 'file' && isPreviewable(entry.name)}
-											<span class="owui-dir-entry-tag">{$i18n.t('Preview')}</span>
-										{/if}
-									</button>
-								</li>
-							{/each}
-						</ul>
-					{/if}
-				</div>
-				<div class="owui-dir-preview">
-					{#if previewLoading}
-						<div class="owui-dir-preview-status">{$i18n.t('Loading preview…')}</div>
-					{:else if previewError}
-						<div class="owui-dir-preview-status owui-dir-error">{previewError}</div>
-					{:else if preview}
-					<div class="owui-dir-preview-header">
-						<span class="owui-dir-preview-name">{preview.name}</span>
-						<button type="button" class="owui-dir-preview-close" on:click={() => (preview = null)}>
-							{$i18n.t('Close')}
-						</button>
-					</div>
-					<pre class="owui-dir-preview-content">{preview.content}</pre>
-				{:else}
-					<div class="owui-dir-preview-status owui-dir-empty">{$i18n.t('Select a previewable file to view its contents.')}</div>
-				{/if}
-				</div>
-			</div>
-		{:else}
-			<div class="owui-dir-status">{$i18n.t('No directory data available.')}</div>
-		{/if}
 	</div>
 </div>
 
@@ -450,7 +550,12 @@
 	.owui-crystal-viewer {
 		position: relative;
 		width: 100%;
-		margin-top: 1.5rem;
+		margin-top: 1rem;
+		display: flex;
+		flex-direction: column;
+		gap: 1rem;
+		height: 100%;
+		min-height: 0;
 	}
 
 	.owui-crystal-canvas {
@@ -458,21 +563,33 @@
 		border-radius: 0.75rem;
 		overflow: hidden;
 		background: rgba(15, 23, 42, 0.05);
-		padding-left: 3.0rem;
-		padding-right: 0.5rem;
+		padding: 0;
 		box-sizing: border-box;
+		flex: 0 0 auto;
+		display: flex;
+		justify-content: center;
+		align-items: stretch;
 	}
 
 	.owui-dir-viewer {
 		margin-top: 1rem;
+		padding-top: 1.25rem;
+		border-top: 1px solid rgba(148, 163, 184, 0.3);
 		width: 100%;
-		border-radius: 0.75rem;
-		background: rgba(15, 23, 42, 0.05);
-		padding: 1rem;
-		box-sizing: border-box;
+		display: flex;
+		flex: 1 1 auto;
+	}
+
+	.owui-dir-panel {
+		flex: 1 1 auto;
 		display: flex;
 		flex-direction: column;
 		gap: 0.75rem;
+		padding: 0;
+		background: rgba(255, 255, 255, 0.92);
+		/* box-shadow: 0 12px 28px rgba(15, 23, 42, 0.08); */
+		min-height: clamp(18rem, 55vh, 44rem);
+		overflow: hidden;
 	}
 
 	.owui-dir-body {
@@ -485,7 +602,8 @@
 	.owui-dir-entries-wrapper {
 		flex: 1 1 40%;
 		min-width: 12rem;
-		max-height: 18rem;
+		min-height: clamp(14rem, 45vh, 28rem);
+		max-height: clamp(22rem, 60vh, 36rem);
 		overflow: auto;
 		display: flex;
 		flex-direction: column;
@@ -664,23 +782,17 @@
 		background: rgba(148, 163, 184, 0.35);
 	}
 
-	.owui-dir-preview-content {
-		margin: 0;
-		max-height: 240px;
-		overflow: auto;
-		padding: 0.75rem;
-		background: rgba(15, 23, 42, 0.1);
-		border-radius: 0.5rem;
-		font-family: 'JetBrains Mono', 'Fira Code', monospace;
-		font-size: 0.8rem;
-		line-height: 1.4;
-		white-space: pre-wrap;
-		word-break: break-word;
-	}
-
 	.owui-dir-preview-status {
 		font-size: 0.8rem;
 		color: rgb(71, 85, 105);
+	}
+
+	.owui-dir-info {
+		color: rgb(37, 99, 235);
+	}
+
+	.owui-dir-success {
+		color: rgb(22, 163, 74);
 	}
 
 	.owui-dir-empty {
@@ -692,7 +804,11 @@
 			flex-direction: column;
 		}
 		.owui-dir-entries-wrapper {
+			min-height: auto;
 			max-height: none;
+		}
+		.owui-dir-panel {
+			min-height: auto;
 		}
 		.owui-dir-preview {
 			border-left: none;
@@ -700,6 +816,34 @@
 			padding-left: 0;
 			padding-top: 0.75rem;
 		}
+	}
+
+	:global(.owui-crystal-canvas > .owui-crystal-toolkit) {
+		display: flex;
+		flex: 1 1 auto;
+		width: 100%;
+		height: 100%;
+	}
+
+	:global(.owui-crystal-toolkit .mpc-scene) {
+		display: flex;
+		flex: 1 1 auto;
+		width: 100%;
+		height: 100%;
+	}
+
+	:global(.owui-crystal-toolkit .mpc-scene-square-wrapper) {
+		max-width: none !important;
+		height: 100%;
+	}
+
+	:global(.owui-crystal-toolkit .mpc-scene-square) {
+		height: 100%;
+	}
+
+	:global(.owui-crystal-toolkit .three-container) {
+		width: 100%;
+		height: 100%;
 	}
 
 	:global(.owui-crystal-toolkit .mpc-tooltip) {

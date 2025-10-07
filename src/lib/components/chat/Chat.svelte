@@ -4,6 +4,7 @@
 	import { PaneGroup, Pane, PaneResizer } from 'paneforge';
 
 	import { getContext, onDestroy, onMount, tick } from 'svelte';
+	import { browser } from '$app/environment';
 	const i18n: Writable<i18nType> = getContext('i18n');
 
 	import { goto } from '$app/navigation';
@@ -162,8 +163,179 @@
 	const crystalHeaderBaseClasses = 'font-semibold tracking-[0.05em] text-[0.95rem]';
 	const crystalFilenameClasses =
 		'truncate font-mono text-[0.75rem] text-slate-500 dark:text-slate-400';
-    let crystalCardLeft = '1.5rem';
-    $: crystalCardLeft = $showSidebar ? 'calc(260px + 1.5rem)' : '1.5rem';
+
+	const clampNumber = (value: number, min: number, max: number) =>
+		Math.min(Math.max(value, min), max);
+	const toPx = (value: number) => `${Math.max(0, Math.round(value))}px`;
+
+	const viewerLayout = {
+		sidePaddingRem: 1.5,
+		rightPaddingRem: 1.5,
+		topOffsetRem: 5.5,
+		bottomOffsetRem: 6.5,
+		minVisibleWidthRem: 10,
+		preferredMinWidthRem: 18,
+		maxWidthRem: 28,
+		minVisibleViewerRem: 9,
+		minViewerHeightRem: 12,
+		maxViewerHeightRem: 22,
+		directoryReserveRem: 13,
+		collapsedSidebarWidthRem: 4.5,
+		expandedSidebarWidthPx: 260,
+		sidebarBreakpointPx: 768
+	} as const;
+
+	let rootRem = 16;
+	let viewportWidth = 1280;
+	let viewportHeight = 720;
+	let crystalCardLeftPx = rootRem * viewerLayout.sidePaddingRem;
+	let crystalCardTopPx = rootRem * viewerLayout.topOffsetRem;
+	let crystalCardBottomPx = rootRem * viewerLayout.bottomOffsetRem;
+	let crystalCardWidthPx = rootRem * viewerLayout.preferredMinWidthRem;
+	let crystalCardHeightBudgetPx = Math.max(
+		0,
+		viewportHeight - crystalCardTopPx - crystalCardBottomPx
+	);
+	let crystalViewerHeightPx = rootRem * viewerLayout.minViewerHeightRem;
+	let crystalCardStyle = `left:${toPx(crystalCardLeftPx)};top:${toPx(crystalCardTopPx)};bottom:${toPx(
+		crystalCardBottomPx
+	)};width:${toPx(crystalCardWidthPx)};`;
+	let viewerContentInsetPx = 0;
+	let viewerContentStyle = '';
+	let messageInputContainer: HTMLDivElement | null = null;
+	let messageInputHeightPx = rootRem * viewerLayout.bottomOffsetRem;
+	let messageInputResizeObserver: ResizeObserver | null = null;
+	let lastObservedMessageInput: Element | null = null;
+
+	const updateViewportMetrics = () => {
+		if (!browser) return;
+		const fontSize = parseFloat(
+			getComputedStyle(document.documentElement).fontSize || '16'
+		);
+		if (!Number.isNaN(fontSize) && fontSize > 0) {
+			rootRem = fontSize;
+		}
+		viewportWidth = window.innerWidth;
+		viewportHeight = window.innerHeight;
+	};
+
+	onMount(() => {
+		if (!browser) return;
+		updateViewportMetrics();
+		const handleResize = () => updateViewportMetrics();
+		window.addEventListener('resize', handleResize);
+		if (typeof ResizeObserver !== 'undefined') {
+			messageInputResizeObserver = new ResizeObserver((entries) => {
+				for (const entry of entries) {
+					messageInputHeightPx = entry.contentRect.height;
+				}
+			});
+			if (messageInputContainer) {
+				messageInputResizeObserver.observe(messageInputContainer);
+			}
+		}
+		return () => {
+			window.removeEventListener('resize', handleResize);
+			messageInputResizeObserver?.disconnect();
+			messageInputResizeObserver = null;
+		};
+	});
+
+	$: if (browser && messageInputResizeObserver) {
+		const target = messageInputContainer;
+		if (target !== lastObservedMessageInput) {
+			messageInputResizeObserver.disconnect();
+			if (target) {
+				messageInputResizeObserver.observe(target);
+			}
+			lastObservedMessageInput = target;
+		}
+	}
+
+	$: {
+		const sidePaddingPx = rootRem * viewerLayout.sidePaddingRem;
+		const rightPaddingPx = rootRem * viewerLayout.rightPaddingRem;
+		const collapsedSidebarWidthPx = rootRem * viewerLayout.collapsedSidebarWidthRem;
+		const isSidebarVisible = viewportWidth >= viewerLayout.sidebarBreakpointPx;
+		const sidebarWidthPx = isSidebarVisible
+			? $showSidebar
+				? viewerLayout.expandedSidebarWidthPx
+				: collapsedSidebarWidthPx
+			: 0;
+		crystalCardLeftPx = sidebarWidthPx + sidePaddingPx;
+
+		const availableWidthPx = Math.max(0, viewportWidth - crystalCardLeftPx - rightPaddingPx);
+		const maxWidthPx = rootRem * viewerLayout.maxWidthRem;
+		const minVisibleWidthPx = rootRem * viewerLayout.minVisibleWidthRem;
+		const preferredMinWidthPx = rootRem * viewerLayout.preferredMinWidthRem;
+		let widthCandidatePx = Math.min(availableWidthPx, maxWidthPx);
+		if (availableWidthPx > preferredMinWidthPx) {
+			widthCandidatePx = Math.max(preferredMinWidthPx, widthCandidatePx);
+		}
+		crystalCardWidthPx = Math.min(widthCandidatePx, availableWidthPx);
+		if (availableWidthPx <= minVisibleWidthPx) {
+			crystalCardWidthPx = availableWidthPx;
+		}
+		if (!Number.isFinite(crystalCardWidthPx) || crystalCardWidthPx < 0) {
+			crystalCardWidthPx = Math.max(0, widthCandidatePx);
+		}
+
+		crystalCardTopPx = rootRem * viewerLayout.topOffsetRem;
+		const fallbackBottomReservePx = rootRem * viewerLayout.bottomOffsetRem;
+		const measuredBottomReservePx = messageInputHeightPx > 0 ? messageInputHeightPx : 0;
+		crystalCardBottomPx = measuredBottomReservePx > 0 ? measuredBottomReservePx : fallbackBottomReservePx;
+		crystalCardHeightBudgetPx = Math.max(
+			0,
+			viewportHeight - crystalCardTopPx - crystalCardBottomPx
+		);
+
+		const minVisibleViewerPx = rootRem * viewerLayout.minVisibleViewerRem;
+		const minViewerPx = rootRem * viewerLayout.minViewerHeightRem;
+		const maxViewerPx = rootRem * viewerLayout.maxViewerHeightRem;
+		const directoryReservePx = rootRem * viewerLayout.directoryReserveRem;
+		const viewerUpperBoundPx = Math.max(
+			minVisibleViewerPx,
+			crystalCardHeightBudgetPx - Math.max(0, directoryReservePx)
+		);
+		const targetViewerHeightPx = clampNumber(
+			crystalCardHeightBudgetPx * 0.45,
+			minViewerPx,
+			maxViewerPx
+		);
+		crystalViewerHeightPx = Math.min(viewerUpperBoundPx, targetViewerHeightPx);
+		const cardHeightLimitPx = Math.max(
+			minVisibleViewerPx,
+			crystalCardHeightBudgetPx - rootRem * 2
+		);
+		crystalViewerHeightPx = clampNumber(
+			crystalViewerHeightPx,
+			minVisibleViewerPx,
+			cardHeightLimitPx
+		);
+
+		crystalCardStyle = [
+			`left:${toPx(crystalCardLeftPx)}`,
+			`top:${toPx(crystalCardTopPx)}`,
+			`bottom:${toPx(crystalCardBottomPx)}`,
+			`width:${toPx(crystalCardWidthPx)}`,
+			`max-width:${toPx(Math.max(0, availableWidthPx))}`,
+			`max-height:${toPx(crystalCardHeightBudgetPx)}`
+		].join(';');
+
+		const gapPx = rootRem * 1;
+		const paneWidthPx = Math.max(0, viewportWidth - sidebarWidthPx);
+		const reserveCandidatePx = crystalCardWidthPx + sidePaddingPx + gapPx;
+		const minChatWidthPx = rootRem * 28;
+		const canReserve =
+			showCrystalViewer &&
+			reserveCandidatePx > 0 &&
+			paneWidthPx - reserveCandidatePx >= minChatWidthPx &&
+			availableWidthPx > rootRem * viewerLayout.minVisibleWidthRem;
+		viewerContentInsetPx = canReserve ? reserveCandidatePx : 0;
+		viewerContentStyle = viewerContentInsetPx
+			? `padding-left:${toPx(viewerContentInsetPx)}`
+			: '';
+	}
 
 	$: if (chatIdProp) {
 		navigateHandler();
@@ -2460,7 +2632,7 @@ $: showCrystalViewer = Boolean(
 						}}
 					/>
 
-					<div class="flex flex-col flex-auto z-10 w-full @container overflow-auto">
+					<div class="flex flex-col flex-auto z-10 w-full @container overflow-auto" style={viewerContentStyle}>
 						{#if ($settings?.landingPageMode === 'chat' && !$selectedFolder) || createMessagesList(history, history.currentId).length > 0}
 							<div
 								class=" pb-2.5 flex flex-col justify-between w-full flex-auto overflow-auto h-0 max-w-full z-10 scrollbar-hidden"
@@ -2473,12 +2645,12 @@ $: showCrystalViewer = Boolean(
 								}}
 							>
 								<div class=" h-full w-full flex flex-col gap-4">
-									{#if showCrystalViewer}
-										<div class="fixed top-1/2 z-20 -translate-y-1/2" style={`left:${crystalCardLeft}`}>
-											<div class="w-full max-w-[28rem] rounded-2xl border border-gray-200/70 bg-white/95 p-3 shadow-sm backdrop-blur-sm dark:border-gray-800/70 dark:bg-gray-900/85">
-												<div class="flex items-baseline justify-between gap-2 pb-2">
-													<span class={`${crystalHeaderBaseClasses} text-gray-900 dark:text-gray-100`}>
-														{$i18n.t('Crystal Structure')}
+										{#if showCrystalViewer}
+											<div class="fixed z-20 overflow-auto" style={crystalCardStyle}>
+												<div class="flex h-full w-full max-w-[28rem] flex-col rounded-2xl bg-white/95 p-3 backdrop-blur-sm">
+													<div class="flex items-baseline justify-between gap-2 pb-2">
+														<span class={`${crystalHeaderBaseClasses} text-gray-900 dark:text-gray-100`}>
+															{$i18n.t('Crystal Structure')}
 													</span>
 													{#if crystalFilename}
 														<span class={crystalFilenameClasses} title={crystalFilename}>
@@ -2486,16 +2658,16 @@ $: showCrystalViewer = Boolean(
 														</span>
 													{/if}
 												</div>
-												<CrystalStructureViewer
-													scene={crystalScene}
-													loading={viewerLoading}
-													error={crystalError}
-													filename={crystalFilename}
-													height={320}
-												/>
+													<CrystalStructureViewer
+														scene={crystalScene}
+														loading={viewerLoading}
+														error={crystalError}
+														filename={crystalFilename}
+														height={Math.round(crystalViewerHeightPx)}
+													/>
+												</div>
 											</div>
-										</div>
-									{/if}
+										{/if}
 									<Messages
 										chatId={$chatId}
 										bind:history
@@ -2521,7 +2693,7 @@ $: showCrystalViewer = Boolean(
 								</div>
 							</div>
 
-							<div class=" pb-2">
+							<div class=" pb-2" bind:this={messageInputContainer}>
 								<MessageInput
 									bind:this={messageInput}
 									{history}
@@ -2576,8 +2748,8 @@ $: showCrystalViewer = Boolean(
 						{:else}
 							<div class="flex flex-col flex-auto h-full overflow-auto gap-4">
 							{#if showCrystalViewer}
-								<div class="fixed top-1/2 z-20 -translate-y-1/2" style={`left:${crystalCardLeft}`}>
-									<div class="w-full max-w-[28rem] rounded-2xl border border-gray-200/70 bg-white/95 p-3 shadow-sm backdrop-blur-sm dark:border-gray-800/70 dark:bg-gray-900/85">
+								<div class="fixed z-20 overflow-auto" style={crystalCardStyle}>
+									<div class="flex h-full w-full max-w-[28rem] flex-col rounded-2xl bg-white/95 p-3 backdrop-blur-sm">
 										<div class="flex items-baseline justify-between gap-2 pb-2">
 											<span class={`${crystalHeaderBaseClasses} text-gray-900 dark:text-gray-100`}>
 												{$i18n.t('Crystal Structure')}
@@ -2593,7 +2765,7 @@ $: showCrystalViewer = Boolean(
 											loading={viewerLoading}
 											error={crystalError}
 											filename={crystalFilename}
-											height={320}
+											height={Math.round(crystalViewerHeightPx)}
 										/>
 									</div>
 								</div>
