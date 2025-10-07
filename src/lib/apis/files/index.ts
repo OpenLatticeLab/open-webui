@@ -242,14 +242,10 @@ export type DirectoryListingResponse = {
 	path: string;
 	parent: string | null;
 	entries: DirectoryListingEntry[];
-	allowed_extensions: string[];
 };
 
-export type FilePreviewResponse = {
-	path: string;
-	name: string;
-	encoding: string;
-	content: string;
+export type ServerCrystalSceneResponse = {
+	scene: Record<string, unknown>;
 };
 
 export const getServerCurrentDirectory = async (token: string, path = '') => {
@@ -287,19 +283,29 @@ export const getServerCurrentDirectory = async (token: string, path = '') => {
 	return res as DirectoryListingResponse | null;
 };
 
-export const getServerFilePreview = async (token: string, path: string) => {
+export const getServerCrystalScene = async (
+	token: string,
+	path: string,
+	radiusStrategy = 'uniform'
+) => {
 	let error = null;
 	const params = new URLSearchParams();
 	params.append('path', path);
+	if (radiusStrategy) {
+		params.append('radius_strategy', radiusStrategy);
+	}
 
-	const res = await fetch(`${WEBUI_API_BASE_URL}/files/system/file-preview?${params.toString()}`, {
-		method: 'GET',
-		headers: {
-			Accept: 'application/json',
-			'Content-Type': 'application/json',
-			authorization: `Bearer ${token}`
+	const res = await fetch(
+		`${WEBUI_API_BASE_URL}/files/system/crystal-scene?${params.toString()}`,
+		{
+			method: 'GET',
+			headers: {
+				Accept: 'application/json',
+				'Content-Type': 'application/json',
+				authorization: `Bearer ${token}`
+			}
 		}
-	})
+	)
 		.then(async (res) => {
 			if (!res.ok) throw await res.json();
 			return res.json();
@@ -314,7 +320,58 @@ export const getServerFilePreview = async (token: string, path: string) => {
 		throw error;
 	}
 
-	return res as FilePreviewResponse | null;
+	return res as ServerCrystalSceneResponse | null;
+};
+
+export const downloadServerFile = async (token: string, path: string) => {
+	const params = new URLSearchParams();
+	params.append('path', path);
+
+	const response = await fetch(
+		`${WEBUI_API_BASE_URL}/files/system/download?${params.toString()}`,
+		{
+			method: 'GET',
+			headers: {
+				Accept: '*/*',
+				authorization: `Bearer ${token}`
+			}
+		}
+	);
+
+	if (!response.ok) {
+		let errorMessage = 'Failed to download file.';
+		try {
+			const data = await response.json();
+			if (data?.detail) {
+				errorMessage = data.detail;
+			}
+		} catch (err) {
+			console.error('Failed to parse download error response', err);
+		}
+		throw new Error(errorMessage);
+	}
+
+	const blob = await response.blob();
+	const disposition = response.headers.get('Content-Disposition') || '';
+	let filename = path.split('/').pop() || 'download';
+	const match = disposition.match(/filename\*=UTF-8''([^;]+)/i);
+	if (match && match[1]) {
+		try {
+			filename = decodeURIComponent(match[1]);
+		} catch (err) {
+			console.error('Failed to decode filename from headers', err);
+		}
+	}
+
+	const blobUrl = URL.createObjectURL(blob);
+	const link = document.createElement('a');
+	link.href = blobUrl;
+	link.download = filename;
+	link.style.display = 'none';
+	document.body.appendChild(link);
+	link.click();
+	link.remove();
+	URL.revokeObjectURL(blobUrl);
 };
 
 export const updateFileDataContentById = async (token: string, id: string, content: string) => {

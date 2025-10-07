@@ -144,6 +144,34 @@ def cif_file_to_scene(file_path: str, *, radius_strategy: str = "uniform") -> Di
     return structure_to_scene_dict(structure, radius_strategy=radius_strategy)
 
 
+def vasp_poscar_file_to_scene(
+    file_path: str, *, radius_strategy: str = "uniform"
+) -> Dict[str, Any]:
+    """Load a VASP POSCAR/CONTCAR file into a CrystalToolkitScene representation."""
+
+    try:  # pragma: no cover - heavy dependency
+        from pymatgen.core.structure import Structure  # type: ignore
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=(
+                "Crystal structure dependencies are unavailable. "
+                "Install 'pymatgen' and 'crystal-toolkit'."
+            ),
+        ) from exc
+
+    try:
+        structure = Structure.from_file(file_path)
+    except Exception as exc:
+        log.exception("Failed to parse VASP POSCAR/CONTCAR file", exc_info=exc)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Unable to parse VASP POSCAR/CONTCAR file.",
+        ) from exc
+
+    return structure_to_scene_dict(structure, radius_strategy=radius_strategy)
+
+
 def cif_string_to_scene(content: str, *, radius_strategy: str = "uniform") -> Dict[str, Any]:
     """Convert CIF content provided as a string to a scene JSON representation."""
 

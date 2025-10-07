@@ -4,7 +4,7 @@ import uuid
 import json
 from fnmatch import fnmatch
 from pathlib import Path
-from typing import List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 from urllib.parse import quote
 import asyncio
 
@@ -23,10 +23,6 @@ from fastapi import (
 
 from fastapi.responses import FileResponse, StreamingResponse
 from open_webui.constants import ERROR_MESSAGES
-from open_webui.config import (
-    DEFAULT_FILE_PREVIEW_ALLOWED_EXTENSIONS,
-    FILE_PREVIEW_ALLOWED_EXTENSIONS,
-)
 from open_webui.env import SRC_LOG_LEVELS
 from open_webui.retrieval.vector.factory import VECTOR_DB_CLIENT
 
@@ -44,7 +40,11 @@ from open_webui.routers.retrieval import ProcessFileForm, process_file
 from open_webui.routers.audio import transcribe
 from open_webui.storage.provider import Storage
 from open_webui.utils.auth import get_admin_user, get_verified_user
-from open_webui.utils.crystal import cif_file_to_scene, cif_string_to_scene
+from open_webui.utils.crystal import (
+    cif_file_to_scene,
+    cif_string_to_scene,
+    vasp_poscar_file_to_scene,
+)
 from pydantic import BaseModel
 
 log = logging.getLogger(__name__)
@@ -69,36 +69,6 @@ class DirectoryListingResponse(BaseModel):
     path: str
     parent: Optional[str]
     entries: List[DirectoryListingEntry]
-    allowed_extensions: List[str]
-
-
-def _normalize_extension(ext: str) -> str:
-    value = ext.strip().lower()
-    if not value:
-        return ""
-    return value if value.startswith(".") else f".{value}"
-
-
-def _get_allowed_preview_extensions_from_config() -> List[str]:
-    configured = FILE_PREVIEW_ALLOWED_EXTENSIONS.value
-    if isinstance(configured, (list, tuple, set)) and configured:
-        normalized = sorted({
-            _normalize_extension(str(item))
-            for item in configured
-            if str(item).strip()
-        })
-        if normalized:
-            return normalized
-
-    return sorted({
-        _normalize_extension(ext)
-        for ext in DEFAULT_FILE_PREVIEW_ALLOWED_EXTENSIONS
-        if ext.strip()
-    })
-
-
-def _allowed_preview_extensions_set() -> set[str]:
-    return set(_get_allowed_preview_extensions_from_config())
 
 
 def _resolve_browser_root(root_value: str) -> Path:
@@ -126,7 +96,6 @@ def get_current_directory_listing(
 
     root_value = getattr(request.app.state.config, "FILE_BROWSER_ROOT", str(Path.cwd()))
     root = _resolve_browser_root(root_value)
-    allowed_extensions = _get_allowed_preview_extensions_from_config()
     try:
         relative_path = Path(path)
     except Exception as exc:
@@ -203,31 +172,15 @@ def get_current_directory_listing(
         path=rel_target,
         parent=parent,
         entries=entries,
-        allowed_extensions=allowed_extensions,
     )
 
-MAX_FILE_PREVIEW_BYTES = 1024 * 128
 
-
-class FilePreviewResponse(BaseModel):
-    path: str
-    name: str
-    encoding: str
-    content: str
-
-
-@router.get("/system/file-preview", response_model=FilePreviewResponse)
-def get_system_file_preview(
-    request: Request,
-    path: str = Query(..., description="Relative path from the server root"),
-    user=Depends(get_verified_user),
-):
-    del user
-
+def _resolve_root_and_target_path(request: Request, raw_path: str) -> tuple[Path, Path]:
     root_value = getattr(request.app.state.config, "FILE_BROWSER_ROOT", str(Path.cwd()))
     root = _resolve_browser_root(root_value)
+
     try:
-        relative_path = Path(path)
+        relative_path = Path(raw_path)
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -244,51 +197,71 @@ def get_system_file_preview(
             detail=ERROR_MESSAGES.DEFAULT("Path escapes the workspace root."),
         ) from exc
 
+    return root, target_path
+
+
+class CrystalSceneResponse(BaseModel):
+    scene: Dict[str, Any]
+
+
+@router.get("/system/crystal-scene", response_model=CrystalSceneResponse)
+def get_system_crystal_scene(
+    request: Request,
+    path: str = Query(..., description="Relative path from the server root"),
+    radius_strategy: str = Query("uniform"),
+    user=Depends(get_verified_user),
+):
+    del user
+
+    _, target_path = _resolve_root_and_target_path(request, path)
+
     if not target_path.exists() or not target_path.is_file():
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=ERROR_MESSAGES.NOT_FOUND,
         )
 
-    file_extension = _normalize_extension(target_path.suffix)
-    if file_extension not in _allowed_preview_extensions_set():
+    name_lower = target_path.name.lower()
+    suffix_lower = target_path.suffix.lower()
+
+    if suffix_lower == ".cif":
+        scene = cif_file_to_scene(str(target_path), radius_strategy=radius_strategy)
+    elif name_lower in ["contcar", "poscar"]:
+        scene = vasp_poscar_file_to_scene(str(target_path), radius_strategy=radius_strategy)
+    else:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=ERROR_MESSAGES.DEFAULT("Preview is not supported for this file type."),
+            detail=ERROR_MESSAGES.DEFAULT(
+                "File is not a supported crystal structure."
+            ),
         )
 
-    try:
-        file_size = target_path.stat().st_size
-    except OSError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=ERROR_MESSAGES.DEFAULT("Unable to read file metadata."),
-        ) from exc
+    return CrystalSceneResponse(scene=scene)
 
-    if file_size > MAX_FILE_PREVIEW_BYTES:
+
+@router.get("/system/download")
+def download_system_file(
+    request: Request,
+    path: str = Query(..., description="Relative path from the server root"),
+    user=Depends(get_verified_user),
+):
+    del user
+
+    _, target_path = _resolve_root_and_target_path(request, path)
+
+    if not target_path.exists() or not target_path.is_file():
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=ERROR_MESSAGES.DEFAULT("File is too large to preview."),
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=ERROR_MESSAGES.NOT_FOUND,
         )
 
-    try:
-        content = target_path.read_text(encoding="utf-8", errors="replace")
-    except OSError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=ERROR_MESSAGES.DEFAULT("Unable to read file content."),
-        ) from exc
+    filename = target_path.name or "download"
+    encoded_filename = quote(filename)
+    headers = {
+        "Content-Disposition": f"attachment; filename*=UTF-8''{encoded_filename}"
+    }
 
-    rel_file_path = os.path.relpath(target_path, root)
-    if rel_file_path == ".":
-        rel_file_path = ""
-
-    return FilePreviewResponse(
-        path=rel_file_path,
-        name=target_path.name,
-        encoding="utf-8",
-        content=content,
-    )
+    return FileResponse(str(target_path), headers=headers)
 
 
 ############################
